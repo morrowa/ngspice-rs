@@ -1,5 +1,5 @@
 // Copyright 2022 Andrew Morrow.
-// lib.rs
+// build.rs
 // ngspice-rs-sys
 //
 // This program is free software: you can redistribute it and/or modify
@@ -15,18 +15,24 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-// see https://github.com/rust-lang/rust-bindgen/issues/1651
-#![allow(deref_nullptr)]
+use std::env;
+use std::path::PathBuf;
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+fn main() {
+    println!("cargo:rustc-link-lib=ngspice");
+    // TODO: don't hard-code these paths
+    println!("cargo:rustc-link-search=/usr/local/ngspice/lib");
+    println!("cargo:rerun-if-changed=wrapper.h");
+    let bindings = bindgen::builder()
+        // TODO: don't hard-code these paths
+        .clang_arg("-I/usr/local/ngspice/include")
+        .header("wrapper.h")
+        .generate()
+        .expect("Unable to generate ngSPICE bindings");
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    bindings
+        .write_to_file(out_path.join("bindings.rs"))
+        .expect("Unable to write ngSPICE bindings");
 }
+

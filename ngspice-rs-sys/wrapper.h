@@ -1,5 +1,5 @@
 // Copyright 2022 Andrew Morrow.
-// lib.rs
+// wrapper.h
 // ngspice-rs-sys
 //
 // This program is free software: you can redistribute it and/or modify
@@ -15,18 +15,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-// see https://github.com/rust-lang/rust-bindgen/issues/1651
-#![allow(deref_nullptr)]
+#include <stdbool.h>
+#include <ngspice/sharedspice.h>
+#include <ngspice/sim.h>
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
-}
