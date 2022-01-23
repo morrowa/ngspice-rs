@@ -24,6 +24,7 @@ fn main() {
     println!("cargo:rustc-link-search=/usr/local/ngspice/lib");
     println!("cargo:rerun-if-changed=wrapper.h");
     let bindings = bindgen::builder()
+        .constified_enum_module("simulation_types")
         // TODO: don't hard-code these paths
         .clang_arg("-I/usr/local/ngspice/include")
         .header("wrapper.h")
