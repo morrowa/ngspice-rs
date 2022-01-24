@@ -36,4 +36,3 @@ fn main() {
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Unable to write ngSPICE bindings");
 }
-
