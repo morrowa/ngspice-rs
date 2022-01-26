@@ -17,9 +17,11 @@
 
 use ngspice_rs_sys::*;
 use once_cell::sync::OnceCell;
+use std::ffi::{CStr, CString};
 use std::marker::PhantomPinned;
 use std::os::raw::{c_char, c_int, c_void};
 use std::pin::Pin;
+use std::ptr;
 use std::sync::Mutex;
 
 // TODO: impl Error
@@ -27,6 +29,7 @@ use std::sync::Mutex;
 pub enum Error {
     StringEncodingError,
     ParseError,
+    Unknown,
 }
 
 // first: simulator state singleton
@@ -35,7 +38,7 @@ pub enum Error {
 // both synchronous, and async using Futures
 // next: vector struct with units
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Simulation {
     pub stdout: String,
     pub stderr: String,
@@ -44,16 +47,26 @@ pub struct Simulation {
 }
 
 extern "C" fn send_char(str: *mut c_char, _: c_int, ctx: *mut c_void) -> c_int {
+    let ctx = ctx as *mut NgSpice;
+    unsafe {
+        let str = CStr::from_ptr(str)
+            .to_str()
+            .expect("non-UTF8 output from ngSPICE");
+        if let Some(x) = str.strip_prefix("stderr ") {
+            (*ctx).stderr.push_str(x);
+            (*ctx).stderr.push('\n');
+        } else if let Some(x) = str.strip_prefix("stdout ") {
+            (*ctx).stdout.push_str(x);
+            (*ctx).stdout.push('\n');
+        } else {
+            (*ctx).stdout.push_str(str);
+            (*ctx).stdout.push('\n');
+        }
+    }
     0
 }
 
-extern "C" fn controlled_exit(
-    _: c_int,
-    _: NG_BOOL,
-    _: NG_BOOL,
-    _: c_int,
-    _: *mut c_void,
-) -> c_int {
+extern "C" fn controlled_exit(_: c_int, _: NG_BOOL, _: NG_BOOL, _: c_int, _: *mut c_void) -> c_int {
     panic!("fatal ngspice error");
 }
 
@@ -104,20 +117,92 @@ impl NgSpice {
         unsafe { &mut self.get_unchecked_mut().stderr }
     }
 
-    pub fn simulate(circuit: &str, command: &str) -> Result<(), Error> {
-        let mut lock = NgSpice::shared().lock().unwrap();
-        lock.as_mut().stdout().truncate(0);
-        lock.as_mut().stderr().truncate(0);
-        // TODO
+    pub fn simulate(circuit: &str, command: &str) -> Result<Simulation, Error> {
+        NgSpice::check_circuit(circuit)?;
+        NgSpice::check_command(command)?;
+        let mut handle = NgSpice::shared().lock().unwrap();
+        handle.as_mut().stdout().truncate(0);
+        handle.as_mut().stderr().truncate(0);
+        handle.as_mut().load_circuit(circuit)?;
+        handle.as_mut().command(command)?;
+        // TODO gather the result vectors
+        let mut sim = Simulation::default();
+        std::mem::swap(handle.as_mut().stdout(), &mut sim.stdout);
+        std::mem::swap(handle.as_mut().stderr(), &mut sim.stderr);
+        Ok(sim)
+    }
+
+    fn check_circuit(circuit: &str) -> Result<(), Error> {
+        if circuit.as_bytes().contains(&0) {
+            return Err(Error::StringEncodingError);
+        }
+        // TODO: make sure the circuit doesn't contain any commands that could screw up our state
+        // e.g. anything that would start a background process
+        // TODO: other checks?
+        // e.g. check for .end
         Ok(())
+    }
+
+    /// You must run check_circuit() first or else this may panic
+    fn load_circuit(self: Pin<&mut Self>, circuit: &str) -> Result<(), Error> {
+        // need a null-terminated array of null-terminated lines
+        let lines: Vec<CString> = circuit
+            .lines()
+            .map(|l| CString::new(l).expect("illegal char in circuit"))
+            .collect();
+        let mut clines: Vec<*const c_char> = lines.iter().map(|l| l.as_ptr()).collect();
+        clines.push(ptr::null());
+        unsafe {
+            // ngSPICE does not actually mutate the strings, but it fails to mark its pointers const
+            if ngSpice_Circ(clines.as_mut_ptr() as *mut *mut c_char) == 0 {
+                Ok(())
+            } else {
+                Err(Error::ParseError)
+            }
+        }
+    }
+
+    fn check_command(cmd: &str) -> Result<(), Error> {
+        if cmd.as_bytes().contains(&0) {
+            return Err(Error::StringEncodingError);
+        }
+        // TODO: prevent quit?
+        Ok(())
+    }
+
+    /// You must run check_command first or else this may panic
+    fn command(self: Pin<&mut Self>, cmd: &str) -> Result<(), Error> {
+        let cmd = CString::new(cmd).expect("illegal char in command");
+        unsafe {
+            // ngSPICE does not actually mutate the strings, but it fails to mark its pointers const
+            if ngSpice_Command(cmd.as_ptr() as *mut c_char) == 0 {
+                Ok(())
+            } else {
+                Err(Error::Unknown)
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::{Error, NgSpice};
+
     #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
+    fn it_works() -> Result<(), Error> {
+        // let result = 2 + 2;
+        // assert_eq!(result, 4);
+        let circuit = ".title Thing
+V2 refv GND dc(3.3)
+V1 vin GND sin(0 17.4 60)
+R3 meas GND 10k
+R1 vin meas 60.4k
+R4 refv meas 10k
+.end";
+        let cmd = "tran 100u 0.17s";
+        let sim = NgSpice::simulate(circuit, cmd)?;
+        assert!(sim.stdout.len() > 0);
+        assert!(sim.stderr.len() > 0);
+        Ok(())
     }
 }
