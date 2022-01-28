@@ -18,19 +18,33 @@
 use ngspice_rs_sys::*;
 use once_cell::sync::OnceCell;
 use std::ffi::{CStr, CString};
+use std::fmt::{self, Formatter};
 use std::marker::PhantomPinned;
 use std::os::raw::{c_char, c_int, c_void};
 use std::pin::Pin;
 use std::ptr;
 use std::sync::Mutex;
 
-// TODO: impl Error
 #[derive(Debug)]
 pub enum Error {
-    StringEncodingError,
-    ParseError,
+    InvalidStringEncoding,
+    InvalidCircuit,
     Unknown,
 }
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::InvalidStringEncoding => {
+                f.write_str("invalid string encoding; all strings must be UTF-8 with no null bytes")
+            }
+            Error::InvalidCircuit => f.write_str("error parsing circuit; see ngSPICE logs"),
+            Error::Unknown => f.write_str("unknown error"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 // first: simulator state singleton
 // next: interface for passing in a circuit
@@ -134,7 +148,7 @@ impl NgSpice {
 
     fn check_circuit(circuit: &str) -> Result<(), Error> {
         if circuit.as_bytes().contains(&0) {
-            return Err(Error::StringEncodingError);
+            return Err(Error::InvalidStringEncoding);
         }
         // TODO: make sure the circuit doesn't contain any commands that could screw up our state
         // e.g. anything that would start a background process
@@ -157,15 +171,16 @@ impl NgSpice {
             if ngSpice_Circ(clines.as_mut_ptr() as *mut *mut c_char) == 0 {
                 Ok(())
             } else {
-                Err(Error::ParseError)
+                Err(Error::InvalidCircuit)
             }
         }
     }
 
     fn check_command(cmd: &str) -> Result<(), Error> {
         if cmd.as_bytes().contains(&0) {
-            return Err(Error::StringEncodingError);
+            return Err(Error::InvalidStringEncoding);
         }
+
         // TODO: prevent quit?
         Ok(())
     }
