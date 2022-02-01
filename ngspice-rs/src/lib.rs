@@ -1,6 +1,6 @@
 // Copyright 2022 Andrew Morrow.
 // lib.rs
-// ngspice-rs-sys
+// ngspice-rs
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -17,6 +17,7 @@
 
 use ngspice_rs_sys::*;
 use once_cell::sync::OnceCell;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fmt::{self, Formatter};
 use std::marker::PhantomPinned;
@@ -27,9 +28,12 @@ use std::sync::Mutex;
 
 #[derive(Debug)]
 pub enum Error {
+    /// A string argument could not be converted to null-terminated UTF-8.
     InvalidStringEncoding,
-    InvalidCircuit,
-    Unknown,
+    /// ngSPICE was unable to parse the circuit. The contained String holds error logs.
+    InvalidCircuit(String),
+    /// ngSPICE returned an unknown error. The contained String holds error logs.
+    Unknown(String),
 }
 
 impl fmt::Display for Error {
@@ -38,26 +42,88 @@ impl fmt::Display for Error {
             Error::InvalidStringEncoding => {
                 f.write_str("invalid string encoding; all strings must be UTF-8 with no null bytes")
             }
-            Error::InvalidCircuit => f.write_str("error parsing circuit; see ngSPICE logs"),
-            Error::Unknown => f.write_str("unknown error"),
+            Error::InvalidCircuit(msg) => f.write_fmt(format_args!("error parsing circuit; ngSPICE logs follow:\n{}", msg)),
+            Error::Unknown(msg) => f.write_fmt(format_args!("unknown error; ngSPICE logs follow:\n{}", msg)),
         }
     }
 }
 
 impl std::error::Error for Error {}
 
-// first: simulator state singleton
-// next: interface for passing in a circuit
-// next: interface for executing a simulation command
-// both synchronous, and async using Futures
-// next: vector struct with units
+#[derive(Clone, Debug)]
+pub enum DataType {
+    Unknown,
+    Time,
+    Frequency,
+    Voltage,
+    Current,
+    // TODO: the rest
+}
 
+impl From<simulation_types::Type> for DataType {
+    fn from(x: simulation_types::Type) -> Self {
+        match x {
+            simulation_types::SV_TIME => DataType::Time,
+            simulation_types::SV_FREQUENCY => DataType::Frequency,
+            simulation_types::SV_VOLTAGE => DataType::Voltage,
+            simulation_types::SV_CURRENT => DataType::Current,
+            // TODO: the rest
+            _ => DataType::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum VectorValues {
+    Real(Vec<f64>),
+    Complex(Vec<num_complex::Complex64>),
+}
+
+#[derive(Clone, Debug)]
+pub struct VectorInfo {
+    pub datatype: DataType,
+    pub values: VectorValues,
+}
+
+/// Represents the results of a single ngSPICE simulation (aka an ngSPICE plot).
 #[derive(Clone, Debug, Default)]
 pub struct Simulation {
+    /// ngSPICE log output to stdout.
     pub stdout: String,
+    /// ngSPICE log output to stderr.
     pub stderr: String,
-    // TODO:
-    // pub vectors:
+    /// All simulation output vectors by name.
+    pub vectors: HashMap<String, VectorInfo>,
+}
+
+impl Simulation {
+    unsafe fn insert_vecinfo(&mut self, v: *const vector_info) {
+        let name = CStr::from_ptr((*v).v_name);
+        let name = name
+            .to_str()
+            .expect("ngSPICE sent non-UTF8 vector name")
+            .to_owned();
+        let datatype = DataType::from((*v).v_type as u32);
+        let len: usize = (*v).v_length as usize;
+        let values: VectorValues = if (*v).v_realdata != ptr::null_mut() {
+            let ary = std::slice::from_raw_parts((*v).v_realdata, len).to_owned();
+            VectorValues::Real(ary)
+        } else {
+            assert_ne!(
+                (*v).v_compdata,
+                ptr::null_mut(),
+                "ngSPICE vector_info must have either real or complex values"
+            );
+            // as of ngspice-35, the ngcomplex struct is memory-layout compatible with num_complex::Complex64
+            // if that changes, this explodes
+            let ary: &[ngcomplex_t] = std::slice::from_raw_parts((*v).v_compdata, len);
+            let ary: &[num_complex::Complex64] = std::mem::transmute(ary);
+            let ary = ary.to_owned();
+            VectorValues::Complex(ary)
+        };
+        let vecinfo = VectorInfo { datatype, values };
+        self.vectors.insert(name, vecinfo);
+    }
 }
 
 extern "C" fn send_char(str: *mut c_char, _: c_int, ctx: *mut c_void) -> c_int {
@@ -86,6 +152,7 @@ extern "C" fn controlled_exit(_: c_int, _: NG_BOOL, _: NG_BOOL, _: c_int, _: *mu
 
 static NGSPICE: OnceCell<Mutex<Pin<Box<NgSpice>>>> = OnceCell::new();
 
+/// Interface to ngSPICE.
 #[derive(Debug)]
 pub struct NgSpice {
     stdout: String,
@@ -94,13 +161,6 @@ pub struct NgSpice {
 }
 
 impl NgSpice {
-    // it seems like this has to return &mut to prevent threading bugs.
-    // except, there's nothing to stop someone calling this from any thread
-    // I can only think of one method that can be called from any thread: Mutex::lock()
-    // so, if I want to have an async interface that uses Futures, I have to force the caller to
-    // hold the lock until the future finishes
-    // alternatively, I could only offer a sync interface at first, and add async later
-    // but even then, it would be best to have a mutex
     fn shared() -> &'static Mutex<Pin<Box<NgSpice>>> {
         NGSPICE.get_or_init(|| {
             let mut sim = Box::pin(NgSpice {
@@ -131,16 +191,45 @@ impl NgSpice {
         unsafe { &mut self.get_unchecked_mut().stderr }
     }
 
+    /// Parses a new circuit and executes a simulation command, returning the complete results.
+    ///
+    /// This function will block until the simulation completes. It may safely be called from any
+    /// thread, but only one simulation will be executed at a time.
+    ///
+    /// # Arguments
+    ///
+    /// * `circuit` - An ngSPICE circuit listing. Must be self-contained
+    ///   (i.e. may not use the `.include` command).
+    ///
+    /// * `command` - An ngSPICE simulation command like `ac` or `tran`.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if ngSPICE encounters an unrecoverable error.
+    ///
+    /// # Errors
+    ///
+    /// If any argument cannot be converted to a null-terminated UTF-8 string, this function will
+    /// return an error.
+    ///
+    /// If ngSPICE cannot parse the circuit or the command, this function will return an error.
     pub fn simulate(circuit: &str, command: &str) -> Result<Simulation, Error> {
         NgSpice::check_circuit(circuit)?;
         NgSpice::check_command(command)?;
+        // We intentionally panic if the Mutex is poisoned, because ngSPICE cannot recover
         let mut handle = NgSpice::shared().lock().unwrap();
         handle.as_mut().stdout().truncate(0);
         handle.as_mut().stderr().truncate(0);
         handle.as_mut().load_circuit(circuit)?;
         handle.as_mut().command(command)?;
-        // TODO gather the result vectors
         let mut sim = Simulation::default();
+        unsafe {
+            let mut vec_name = ngSpice_AllVecs(ngSpice_CurPlot()) as *const *mut c_char;
+            while *vec_name != ptr::null_mut() {
+                sim.insert_vecinfo(ngGet_Vec_Info(*vec_name));
+                vec_name = vec_name.add(1);
+            }
+        }
         std::mem::swap(handle.as_mut().stdout(), &mut sim.stdout);
         std::mem::swap(handle.as_mut().stderr(), &mut sim.stderr);
         Ok(sim)
@@ -171,7 +260,7 @@ impl NgSpice {
             if ngSpice_Circ(clines.as_mut_ptr() as *mut *mut c_char) == 0 {
                 Ok(())
             } else {
-                Err(Error::InvalidCircuit)
+                Err(Error::InvalidCircuit(self.stderr().clone()))
             }
         }
     }
@@ -193,7 +282,7 @@ impl NgSpice {
             if ngSpice_Command(cmd.as_ptr() as *mut c_char) == 0 {
                 Ok(())
             } else {
-                Err(Error::Unknown)
+                Err(Error::Unknown(self.stderr().clone()))
             }
         }
     }
@@ -205,8 +294,6 @@ mod tests {
 
     #[test]
     fn it_works() -> Result<(), Error> {
-        // let result = 2 + 2;
-        // assert_eq!(result, 4);
         let circuit = ".title Thing
 V2 refv GND dc(3.3)
 V1 vin GND sin(0 17.4 60)
@@ -218,6 +305,7 @@ R4 refv meas 10k
         let sim = NgSpice::simulate(circuit, cmd)?;
         assert!(sim.stdout.len() > 0);
         assert!(sim.stderr.len() > 0);
+        assert!(sim.vectors.len() > 0);
         Ok(())
     }
 }
