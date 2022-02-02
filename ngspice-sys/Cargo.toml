@@ -1,5 +1,5 @@
 [package]
-name = "ngspice-rs-sys"
+name = "ngspice-sys"
 version = "0.1.0"
 edition = "2021"
 

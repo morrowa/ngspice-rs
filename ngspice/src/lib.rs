@@ -1,6 +1,6 @@
 // Copyright 2022 Andrew Morrow.
 // lib.rs
-// ngspice-rs
+// ngspice
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU Affero General Public License as published by
@@ -15,7 +15,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use ngspice_rs_sys::*;
+use ngspice_sys::*;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -42,8 +42,13 @@ impl fmt::Display for Error {
             Error::InvalidStringEncoding => {
                 f.write_str("invalid string encoding; all strings must be UTF-8 with no null bytes")
             }
-            Error::InvalidCircuit(msg) => f.write_fmt(format_args!("error parsing circuit; ngSPICE logs follow:\n{}", msg)),
-            Error::Unknown(msg) => f.write_fmt(format_args!("unknown error; ngSPICE logs follow:\n{}", msg)),
+            Error::InvalidCircuit(msg) => f.write_fmt(format_args!(
+                "error parsing circuit; ngSPICE logs follow:\n{}",
+                msg
+            )),
+            Error::Unknown(msg) => {
+                f.write_fmt(format_args!("unknown error; ngSPICE logs follow:\n{}", msg))
+            }
         }
     }
 }
@@ -169,7 +174,7 @@ impl NgSpice {
                 _pin: PhantomPinned,
             });
             unsafe {
-                ngspice_rs_sys::ngSpice_Init(
+                ngSpice_Init(
                     Some(send_char),
                     None,
                     Some(controlled_exit),

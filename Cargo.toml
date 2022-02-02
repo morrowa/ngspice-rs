@@ -1,6 +1,6 @@
 [workspace]
 
 members = [
-    "ngspice-rs-sys",
-    "ngspice-rs",
+    "ngspice-sys",
+    "ngspice",
 ]
