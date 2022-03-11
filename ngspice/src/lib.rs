@@ -55,7 +55,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataType {
     Unknown,
     Time,
@@ -82,6 +82,24 @@ impl From<simulation_types::Type> for DataType {
 pub enum VectorValues {
     Real(Vec<f64>),
     Complex(Vec<num_complex::Complex64>),
+}
+
+impl VectorValues {
+    /// If this VectorValues contains real numbers, returns Some. Otherwise, returns None.
+    pub fn real(&self) -> Option<&[f64]> {
+        match self {
+            VectorValues::Real(x) => Some(x),
+            VectorValues::Complex(_) => None,
+        }
+    }
+
+    /// If this VectorValues contains complex numbers, returns Some. Otherwise, returns None.
+    pub fn complex(&self) -> Option<&[num_complex::Complex64]> {
+        match self {
+            VectorValues::Real(_) => None,
+            VectorValues::Complex(x) => Some(x),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -295,7 +313,7 @@ impl NgSpice {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Error, NgSpice};
+    use crate::{DataType, Error, NgSpice};
 
     #[test]
     fn it_works() -> Result<(), Error> {
@@ -311,6 +329,36 @@ R4 refv meas 10k
         assert!(sim.stdout.len() > 0);
         assert!(sim.stderr.len() > 0);
         assert!(sim.vectors.len() > 0);
+        let t_vec = sim
+            .vectors
+            .values()
+            .find(|&val| val.datatype == DataType::Time)
+            .expect("could not find time vector");
+        let t_vals = t_vec.values.real().expect("time must be real");
+        assert!(
+            t_vals.len() >= 1700,
+            "should be at least 1700 values (170ms / 0.1ms)"
+        );
+        assert_eq!(0.0, t_vals[0]);
+        assert!(0.17 <= *t_vals.last().unwrap());
+        let refv = sim.vectors.get("refv").unwrap();
+        assert_eq!(refv.datatype, DataType::Voltage);
+        assert!(refv
+            .values
+            .real()
+            .unwrap()
+            .iter()
+            .all(|&x| (x - 3.3).abs() < 0.01));
+        let vin = sim.vectors.get("vin").unwrap();
+        assert_eq!(vin.datatype, DataType::Voltage);
+        let vin_peaks = vin
+            .values
+            .real()
+            .unwrap()
+            .iter()
+            .filter(|&&x| x >= 17.39)
+            .count();
+        assert!(vin_peaks > 0);
         Ok(())
     }
 }
