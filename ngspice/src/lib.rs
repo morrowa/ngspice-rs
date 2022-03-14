@@ -139,6 +139,7 @@ impl Simulation {
             );
             // as of ngspice-35, the ngcomplex struct is memory-layout compatible with num_complex::Complex64
             // if that changes, this explodes
+            // TODO: can I write a unit test to check this? or a build check?
             let ary: &[ngcomplex_t] = std::slice::from_raw_parts((*v).v_compdata, len);
             let ary: &[num_complex::Complex64] = std::mem::transmute(ary);
             let ary = ary.to_owned();
@@ -186,6 +187,8 @@ pub struct NgSpice {
 impl NgSpice {
     fn shared() -> &'static Mutex<Pin<Box<NgSpice>>> {
         NGSPICE.get_or_init(|| {
+            // It's critical that this struct is Pinned _before_ the call to ngSpice_Init.
+            // Otherwise, it can be moved in memory when ownership moves into the Mutex.
             let mut sim = Box::pin(NgSpice {
                 stdout: String::new(),
                 stderr: String::new(),
@@ -240,7 +243,7 @@ impl NgSpice {
         NgSpice::check_circuit(circuit)?;
         NgSpice::check_command(command)?;
         // We intentionally panic if the Mutex is poisoned, because ngSPICE cannot recover
-        let mut handle = NgSpice::shared().lock().unwrap();
+        let mut handle = NgSpice::shared().lock().expect("ngSPICE mutex was poisoned, meaning ngSPICE encountered a fatal error on another thread");
         handle.as_mut().stdout().truncate(0);
         handle.as_mut().stderr().truncate(0);
         handle.as_mut().load_circuit(circuit)?;
@@ -248,6 +251,7 @@ impl NgSpice {
         let mut sim = Simulation::default();
         unsafe {
             let mut vec_name = ngSpice_AllVecs(ngSpice_CurPlot()) as *const *mut c_char;
+            debug_assert_ne!(vec_name, ptr::null());
             while *vec_name != ptr::null_mut() {
                 sim.insert_vecinfo(ngGet_Vec_Info(*vec_name));
                 vec_name = vec_name.add(1);
